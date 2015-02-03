@@ -1,6 +1,10 @@
 /*
  * Invoke gsmstack() with any kind of burst. Automaticly decode and retrieve
  * information.
+ *
+ *Modified by Paul Kinsella <kali.gsm.rtl.sdr@gmail.com> to dump tmsi's for linking tmsi to phone number via silent sms.
+ *Coding Help from Piotr https://github.com/gr-gsm
+ *Code is modified version of tmsi dumper to work on gsm-receiver on kali linux.
  */
 #include "system.h"
 #include <stdlib.h>
@@ -22,9 +26,24 @@
 #include <osmocom/core/gsmtap.h>
 #include <osmocom/core/gsmtap_util.h>
 
+#include <time.h>
+
+FILE* tmsiFile;
+
 static const int USEFUL_BITS = 142;
 
 static void out_gsmdecode(char type, int arfcn, int ts, int fn, char *data, int len);
+
+static void filter_tmsi(char *data, int len);
+
+void write_tmsi(char *tmsi, unsigned int tmsi_index);
+
+void write_imsi(char *imsi, unsigned int imsi_index);
+
+void writetimestamp(FILE* filename, int page_type);
+
+time_t rawtime;
+struct tm * timeinfo;
 
 /* encode a decoded burst (1 bit per byte) into 8-bit-per-byte */
 static void burst_octify(unsigned char *dest, 
@@ -261,6 +280,7 @@ GS_process(GS_CTX *ctx, int ts, int type, const unsigned char *src, int fn, int 
 			return -1;
 		}
 
+		//filter_tmsi(data,len);//uncomment to activate
 		out_gsmdecode(0, 0, ts, ctx->fn, data, len);
 
 		if (ctx->gsmtap_inst) {
@@ -303,6 +323,7 @@ GS_process(GS_CTX *ctx, int ts, int type, const unsigned char *src, int fn, int 
 		}
 		//DEBUGF("OK TS %d, len %d\n", ts, len);
 
+		//filter_tmsi(data,len);//uncomment to activate
 		out_gsmdecode(0, 0, ts, ctx->fn, data, len);
 
 		if (ctx->gsmtap_inst) {
@@ -346,4 +367,170 @@ out_gsmdecode(char type, int arfcn, int ts, int fn, char *data, int len)
 		printf(" %02.2x", (unsigned char)*data++);
 	printf("\n");
 	fflush(stdout);
+}
+
+/*
+ *Dump all tmsi and imsi with a timestamp.
+ */
+static void
+filter_tmsi(char *data,int len)
+{
+
+  uint8_t msg_len = data[0];
+  uint8_t direction_and_protocol = data[1];
+  uint8_t msg_type = data[2];
+
+    if( direction_and_protocol == 0x06 &&                    //direction from originating site, transaction id==0, Radio Resouce Management protocol
+        (msg_type==0x21 || msg_type==0x22 || msg_type==0x24) //types corresponding to paging requests
+      ) 
+    {
+        //write timestamp
+        switch(msg_type) {
+            case 0x21: //Paging Request Type 1
+            {
+                uint8_t mobile_identity_type = data[5] & 0x07;// binary 
+                unsigned int next_element_index = 0; //position of the next element
+                unsigned int found_id_element = 0;// 0 = false 1 = true
+                //printf("21");                                
+                if(mobile_identity_type == 0x04) //identity type: TMSI (binary 100)
+                {
+                  next_element_index = 10;
+                  found_id_element = 1;//true
+		  write_tmsi(data, 6);
+
+		}else 
+                if(mobile_identity_type == 0x01) //identity type: IMSI (binary 001)
+                {
+                  next_element_index = 13;
+                  found_id_element = 1;//true
+		  write_imsi(data,5);
+
+                }
+	      
+                if(found_id_element == 1)
+                {
+                    //check if there is additional id element
+                    uint8_t element_id = data[next_element_index];
+                    if((next_element_index < (msg_len+1)) && (element_id == 0x17)){
+                        //check if there is another element
+                        uint8_t element_len = data[next_element_index+1];
+                        mobile_identity_type = data[next_element_index+2] & 0x07;
+
+                        if(mobile_identity_type == 0x04) //identity type: TMSI
+                        {
+			  write_tmsi(data, next_element_index+3);
+
+                        } else 
+                        if(mobile_identity_type == 0x01) //identity type: IMSI
+                        {
+			  write_imsi(data, next_element_index+2);
+                        }
+                    }
+                    
+                } 	      
+
+
+	    }break;
+
+            case 0x22: //Paging Request Type 1
+            {
+
+                uint8_t mobile_identity_type = data[14] & 0x07;
+		write_tmsi(data, 4);
+		write_tmsi(data, 8);
+                                                
+                if(mobile_identity_type == 0x04) //identity type: TMSI
+                {
+		  write_tmsi(data,15);
+                  
+                } else 
+                if(mobile_identity_type == 0x01) //identity type: IMSI
+                {
+                    write_imsi(data,14);  
+                }
+
+	      
+	    }break;
+	    case 0x24: //Paging Request Type 1
+            {
+
+		unsigned int TMSI_INDEX[4] ={4,8,12,16};// indexes of the 4 tmsi's 
+		int x;
+		for(x =0;x < 4;x++)
+		{
+                    write_tmsi(data,TMSI_INDEX[x]);
+ 
+		}
+	      
+	    }break;
+	}
+    }
+
+
+}
+
+void write_tmsi(char *tmsi, unsigned int tmsi_index){
+ 
+  tmsiFile = fopen("tmsicount.txt", "a+");
+  fprintf(tmsiFile,"%02.2x%02.2x%02.2x%02.2x",
+	 (unsigned char)tmsi[tmsi_index],
+	 (unsigned char)tmsi[tmsi_index+1],
+	 (unsigned char)tmsi[tmsi_index+2],
+	  (unsigned char)tmsi[tmsi_index+3]);
+  
+  writetimestamp(tmsiFile,0);
+
+
+}
+
+void write_imsi(char *imsi, unsigned int imsi_index){
+  
+  tmsiFile = fopen("tmsicount.txt", "a+");
+  writetimestamp(tmsiFile,1);
+
+   fprintf(tmsiFile,"%02.2x%02.2x%02.2x%02.2x%02.2x%02.2x%02.2x%02.2x\n",
+		  (unsigned char)imsi[imsi_index],
+		  (unsigned char)imsi[imsi_index+1],
+		  (unsigned char)imsi[imsi_index+2],
+		  (unsigned char)imsi[imsi_index+3],
+		  (unsigned char)imsi[imsi_index+4],
+		  (unsigned char)imsi[imsi_index+5],
+		  (unsigned char)imsi[imsi_index+6],
+		  (unsigned char)imsi[imsi_index+7],
+		  (unsigned char)imsi[imsi_index+8]);
+   fclose(tmsiFile);
+}
+
+void writetimestamp(FILE* filename, int page_type)
+{
+
+  time (&rawtime);
+  timeinfo = localtime (&rawtime);
+
+  switch(page_type)
+    {
+    case 0://tmsi = 0
+    {
+        fprintf(filename,"-%02i%02i%02i%02i%02i%02i-0\n",
+		   	   1900 + timeinfo->tm_year-2000,
+		   	   1+timeinfo->tm_mon,
+		   	   timeinfo->tm_mday,
+		   	   timeinfo->tm_hour,
+		   	   timeinfo->tm_min,
+		   	   timeinfo->tm_sec);
+	fclose(filename);
+    }break;
+    case 1:// imsi = 1
+    {
+
+      fprintf(filename,"0-%02i%02i%02i%02i%02i%02i-",
+		   	   1900 + timeinfo->tm_year-2000,
+		   	   1+timeinfo->tm_mon,
+		   	   timeinfo->tm_mday,
+		   	   timeinfo->tm_hour,
+		   	   timeinfo->tm_min,
+		   	   timeinfo->tm_sec);
+    }break;
+    }
+
 }

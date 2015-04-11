@@ -10,8 +10,8 @@
 #get imsi/tmsi/key from compatible usb modem/phone.
 #
 
-
-
+#to get this to work rename the gsmstack.c file to gsmstack_bak.c and rename gsmstack_server.c file the gsmstack.c
+#then make gsm-receiver again.
 
 from gnuradio import gr, gru, eng_notation, blks2, optfir
 from gnuradio.eng_option import eng_option
